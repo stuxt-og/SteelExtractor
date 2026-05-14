@@ -13,6 +13,7 @@ import net.minecraft.server.MinecraftServer
 import net.minecraft.world.level.EmptyBlockGetter
 import net.minecraft.world.level.block.Block
 import net.minecraft.world.level.block.state.BlockBehaviour
+import net.minecraft.world.level.block.state.BlockState
 import net.minecraft.world.level.block.state.properties.BlockStateProperties
 import net.minecraft.world.level.block.state.properties.NoteBlockInstrument
 import net.minecraft.world.level.block.state.properties.Property
@@ -78,11 +79,12 @@ class Blocks : SteelExtractor.Extractor {
 
     /**
      * Computes shape data (default + overwrites) for a given shape extractor function.
-     * Returns a Pair of (defaultShapeAabbs, shapeMap) for use in building overwrites.
+     * Returns the default AABBs, their top-level shape indices, and the deduplicated
+     * shape map used to build overwrites.
      */
     private fun computeShapeData(
-        possibleStates: List<net.minecraft.world.level.block.state.BlockState>,
-        shapeExtractor: (net.minecraft.world.level.block.state.BlockState) -> List<AABB>
+        possibleStates: List<BlockState>,
+        shapeExtractor: (BlockState) -> List<AABB>
     ): Triple<List<AABB>, JsonArray, LinkedHashMap<List<AABB>, JsonArray>> {
         val shapeCounts = LinkedHashMap<List<AABB>, Int>()
         val shapeMap = LinkedHashMap<List<AABB>, JsonArray>()
@@ -116,21 +118,57 @@ class Blocks : SteelExtractor.Extractor {
         return !current.zip(default).all { (c, d) -> c == d }
     }
 
+    private fun emptyShapeDataJson(): JsonObject {
+        val shapeJson = JsonObject()
+        shapeJson.add("default", JsonArray())
+        shapeJson.add("overwrites", JsonArray())
+        return shapeJson
+    }
+
+    private fun buildShapeDataJson(
+        possibleStates: List<BlockState>,
+        defaultAabbs: List<AABB>,
+        defaultIdxs: JsonArray,
+        shapeMap: LinkedHashMap<List<AABB>, JsonArray>,
+        shapeName: String,
+        shapeExtractor: (BlockState) -> List<AABB>
+    ): JsonObject {
+        val shapeJson = JsonObject()
+        shapeJson.add("default", defaultIdxs)
+
+        val overwrites = JsonArray()
+        for (i in possibleStates.indices) {
+            val state = possibleStates[i]
+            val currentAabbs = shapeExtractor(state)
+
+            if (shapesDiffer(currentAabbs, defaultAabbs)) {
+                val overwrite = JsonObject()
+                val shapeIdxs = shapeMap[currentAabbs] ?: run {
+                    logger.error("$shapeName shape not found in map for state offset $i. Recalculating.")
+                    val tempArray = JsonArray()
+                    for (box in currentAabbs) {
+                        val idx = shapes.putIfAbsent(box, shapes.size)
+                        tempArray.add(Objects.requireNonNullElseGet(idx) { shapes.size - 1 })
+                    }
+                    tempArray
+                }
+                overwrite.addProperty("offset", i)
+                overwrite.add("shapes", shapeIdxs)
+                overwrites.add(overwrite)
+            }
+        }
+        shapeJson.add("overwrites", overwrites)
+        return shapeJson
+    }
+
     fun createBlockShapesJson(block: Block): JsonObject {
         val resultJson = JsonObject()
         val possibleStates = block.stateDefinition.possibleStates
 
         if (possibleStates.isEmpty()) {
-            val emptyCollisions = JsonObject()
-            emptyCollisions.add("default", JsonArray())
-            emptyCollisions.add("overwrites", JsonArray())
-            resultJson.add("collision_shapes", emptyCollisions)
-
-            val emptyOutlines = JsonObject()
-            emptyOutlines.add("default", JsonArray())
-            emptyOutlines.add("overwrites", JsonArray())
-            resultJson.add("outline_shapes", emptyOutlines)
-
+            resultJson.add("collision_shapes", emptyShapeDataJson())
+            resultJson.add("support_shapes", emptyShapeDataJson())
+            resultJson.add("outline_shapes", emptyShapeDataJson())
             return resultJson
         }
 
@@ -144,61 +182,29 @@ class Blocks : SteelExtractor.Extractor {
             state.getShape(EmptyBlockGetter.INSTANCE, BlockPos.ZERO).toAabbs()
         }
 
-        // Build collision_shapes object
-        val collisionShapesJson = JsonObject()
-        collisionShapesJson.add("default", defaultCollisionIdxs)
-
-        val collisionOverwrites = JsonArray()
-        for (i in possibleStates.indices) {
-            val state = possibleStates[i]
-            val currentAabbs = state.getCollisionShape(EmptyBlockGetter.INSTANCE, BlockPos.ZERO).toAabbs()
-
-            if (shapesDiffer(currentAabbs, defaultCollisionAabbs)) {
-                val overwrite = JsonObject()
-                val shapeIdxs = collisionMap[currentAabbs] ?: run {
-                    logger.error("Collision shape not found in map for state offset $i. Recalculating.")
-                    val tempArray = JsonArray()
-                    for (box in currentAabbs) {
-                        val idx = shapes.putIfAbsent(box, shapes.size)
-                        tempArray.add(Objects.requireNonNullElseGet(idx) { shapes.size - 1 })
-                    }
-                    tempArray
-                }
-                overwrite.addProperty("offset", i)
-                overwrite.add("shapes", shapeIdxs)
-                collisionOverwrites.add(overwrite)
-            }
+        // Compute support shapes
+        val (defaultSupportAabbs, defaultSupportIdxs, supportMap) = computeShapeData(possibleStates) { state ->
+            state.getBlockSupportShape(EmptyBlockGetter.INSTANCE, BlockPos.ZERO).toAabbs()
         }
-        collisionShapesJson.add("overwrites", collisionOverwrites)
-        resultJson.add("collision_shapes", collisionShapesJson)
 
-        // Build outline_shapes object
-        val outlineShapesJson = JsonObject()
-        outlineShapesJson.add("default", defaultOutlineIdxs)
-
-        val outlineOverwrites = JsonArray()
-        for (i in possibleStates.indices) {
-            val state = possibleStates[i]
-            val currentAabbs = state.getShape(EmptyBlockGetter.INSTANCE, BlockPos.ZERO).toAabbs()
-
-            if (shapesDiffer(currentAabbs, defaultOutlineAabbs)) {
-                val overwrite = JsonObject()
-                val shapeIdxs = outlineMap[currentAabbs] ?: run {
-                    logger.error("Outline shape not found in map for state offset $i. Recalculating.")
-                    val tempArray = JsonArray()
-                    for (box in currentAabbs) {
-                        val idx = shapes.putIfAbsent(box, shapes.size)
-                        tempArray.add(Objects.requireNonNullElseGet(idx) { shapes.size - 1 })
-                    }
-                    tempArray
-                }
-                overwrite.addProperty("offset", i)
-                overwrite.add("shapes", shapeIdxs)
-                outlineOverwrites.add(overwrite)
+        resultJson.add(
+            "collision_shapes",
+            buildShapeDataJson(possibleStates, defaultCollisionAabbs, defaultCollisionIdxs, collisionMap, "Collision") { state ->
+                state.getCollisionShape(EmptyBlockGetter.INSTANCE, BlockPos.ZERO).toAabbs()
             }
-        }
-        outlineShapesJson.add("overwrites", outlineOverwrites)
-        resultJson.add("outline_shapes", outlineShapesJson)
+        )
+        resultJson.add(
+            "support_shapes",
+            buildShapeDataJson(possibleStates, defaultSupportAabbs, defaultSupportIdxs, supportMap, "Support") { state ->
+                state.getBlockSupportShape(EmptyBlockGetter.INSTANCE, BlockPos.ZERO).toAabbs()
+            }
+        )
+        resultJson.add(
+            "outline_shapes",
+            buildShapeDataJson(possibleStates, defaultOutlineAabbs, defaultOutlineIdxs, outlineMap, "Outline") { state ->
+                state.getShape(EmptyBlockGetter.INSTANCE, BlockPos.ZERO).toAabbs()
+            }
+        )
 
         return resultJson
     }
@@ -285,6 +291,7 @@ class Blocks : SteelExtractor.Extractor {
 
             val shapesStructureJson = createBlockShapesJson(block)
             blockJson.add("collision_shapes", shapesStructureJson.getAsJsonObject("collision_shapes"))
+            blockJson.add("support_shapes", shapesStructureJson.getAsJsonObject("support_shapes"))
             blockJson.add("outline_shapes", shapesStructureJson.getAsJsonObject("outline_shapes"))
 
             // Only add if there are actual differences
