@@ -6,9 +6,7 @@
 		"ExampleMixin",
 		"ChunkStepMixin",
 		"ChunkAccessBiomeCacheMixin",
-		"ClimateParameterListAccessor",
 		"ClimateRTreeMixin",
-		"MultiNoiseBiomeSourceMixin",
 		"AxeItemAccessor"
 	],
 	"injectors": {
