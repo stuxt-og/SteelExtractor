@@ -19,11 +19,10 @@ import java.util.Set;
 @Mixin(ChunkStep.class)
 public class ChunkStepMixin {
 
-    private static final Set<ChunkStatus> BLOCK_MODIFYING_STAGES = Set.of(
+    private static final Set<ChunkStatus> IMMEDIATE_HASH_STAGES = Set.of(
         ChunkStatus.NOISE,
         ChunkStatus.SURFACE,
-        ChunkStatus.CARVERS,
-        ChunkStatus.FEATURES
+        ChunkStatus.CARVERS
     );
 
     @Shadow
@@ -38,7 +37,7 @@ public class ChunkStepMixin {
             return;
         }
 
-        if (BLOCK_MODIFYING_STAGES.contains(this.targetStatus)) {
+        if (IMMEDIATE_HASH_STAGES.contains(this.targetStatus)) {
             LevelChunkSection[] sections = chunk.getSections();
             if (ChunkStageHashStorage.INSTANCE.getEnableBinaryDump()) {
                 BlockHashResult result = ChunkStageHashStorage.INSTANCE.computeBlockHashWithData(java.util.Arrays.asList(sections));

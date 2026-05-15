@@ -26,6 +26,7 @@ import net.minecraft.resources.ResourceKey
 import net.minecraft.server.level.ServerLevel
 import net.minecraft.world.level.ChunkPos
 import net.minecraft.world.level.Level
+import net.minecraft.world.level.chunk.ChunkAccess
 import net.minecraft.world.level.chunk.status.ChunkStatus
 import com.steelextractor.extractors.PoiTypesExtractor
 import com.steelextractor.extractors.Potions
@@ -59,27 +60,35 @@ object SteelExtractor : ModInitializer {
     /** Sampling parameters: place random CLUSTER_SIZE x CLUSTER_SIZE clusters within a SAMPLE_HALF_RANGE*2 x SAMPLE_HALF_RANGE*2 area. */
     const val CHUNK_SAMPLE_SEED: Long = 123456
     private const val CLUSTER_SIZE: Int = 10 // 10x10 chunks per cluster
+    private const val CHUNKS_PER_CLUSTER: Int = CLUSTER_SIZE * CLUSTER_SIZE
     private const val NUM_CLUSTERS: Int = 25 // 25 clusters * 100 = 2,500 chunks
-    const val NUM_SAMPLE_CHUNKS: Int = NUM_CLUSTERS * CLUSTER_SIZE * CLUSTER_SIZE
+    const val NUM_SAMPLE_CHUNKS: Int = NUM_CLUSTERS * CHUNKS_PER_CLUSTER
     private const val SAMPLE_HALF_RANGE: Int = 500_000 // 1000,000x1000,000 chunk area
-    private const val CARVER_CHUNKS_PER_TICK = 64
-    private const val FEATURE_CHUNKS_PER_TICK = 64
+    private const val CARVER_CHUNKS_PER_TICK = CHUNKS_PER_CLUSTER
+    private const val FEATURE_CHUNKS_PER_TICK = CHUNKS_PER_CLUSTER
     private val CHUNK_POSITION_ORDER: Comparator<ChunkPos> = compareBy({ it.x }, { it.z })
 
-    /** Generate the same sampled chunk positions used by chunk stage hash extraction. */
-    fun sampledChunkPositions(): List<ChunkPos> {
+    /** Generate the same sampled chunk clusters used by chunk stage hash extraction. */
+    fun sampledChunkClusters(): List<List<ChunkPos>> {
         val rng = Random(CHUNK_SAMPLE_SEED)
-        val positions = mutableListOf<ChunkPos>()
+        val clusters = mutableListOf<List<ChunkPos>>()
         for (i in 0 until NUM_CLUSTERS) {
             val originX = rng.nextInt(-SAMPLE_HALF_RANGE, SAMPLE_HALF_RANGE)
             val originZ = rng.nextInt(-SAMPLE_HALF_RANGE, SAMPLE_HALF_RANGE)
+            val positions = mutableListOf<ChunkPos>()
             for (dx in 0 until CLUSTER_SIZE) {
                 for (dz in 0 until CLUSTER_SIZE) {
                     positions.add(ChunkPos(originX + dx, originZ + dz))
                 }
             }
+            clusters.add(positions)
         }
-        return positions
+        return clusters
+    }
+
+    /** Generate the same sampled chunk positions used by chunk stage hash extraction. */
+    fun sampledChunkPositions(): List<ChunkPos> {
+        return sampledChunkClusters().flatten()
     }
 
     override fun onInitialize() {
@@ -127,8 +136,11 @@ object SteelExtractor : ModInitializer {
             "minecraft:the_end" to Level.END
         )
 
-        val sampledPositions = sampledChunkPositions()
-        val generationPositions = sampledPositions.sortedWith(CHUNK_POSITION_ORDER)
+        val sampledClusters = sampledChunkClusters()
+        val sampledPositions = sampledClusters.flatten()
+        val generationClusters = sampledClusters
+            .map { cluster -> cluster.sortedWith(CHUNK_POSITION_ORDER) }
+            .sortedWith(compareBy({ it.first().x }, { it.first().z }))
 
         if (ENABLE_CHUNK_EXTRACTION) {
             ServerLifecycleEvents.SERVER_STARTING.register { _ ->
@@ -175,21 +187,31 @@ object SteelExtractor : ModInitializer {
         // Build per-dimension chunk queues. Features are order-dependent because
         // they can write into neighboring chunks, so keep the vanilla fixture order
         // aligned with the serialized JSON/test order.
+        data class ClusterWork(
+            val positions: List<ChunkPos>,
+            val carverQueue: ArrayDeque<ChunkPos>,
+            val featureQueue: ArrayDeque<ChunkPos>,
+            val featureChunks: MutableMap<ChunkPos, ChunkAccess> = mutableMapOf()
+        )
+
         data class DimensionWork(
             val dimensionKey: ResourceKey<Level>,
             val dimId: String,
-            val carverQueue: ArrayDeque<ChunkPos>,
-            val featureQueue: ArrayDeque<ChunkPos>
+            val clusters: ArrayDeque<ClusterWork>,
+            var carverProgress: Int = 0,
+            var featureProgress: Int = 0
         )
 
         val dimWork = dimensions.map { (dimId, key) ->
-            val carverQueue = ArrayDeque<ChunkPos>()
-            val featureQueue = ArrayDeque<ChunkPos>()
-            for (pos in generationPositions) {
-                carverQueue.add(pos)
-                featureQueue.add(pos)
+            val clusters = ArrayDeque<ClusterWork>()
+            for (positions in generationClusters) {
+                val carverQueue = ArrayDeque<ChunkPos>()
+                val featureQueue = ArrayDeque<ChunkPos>()
+                carverQueue.addAll(positions)
+                featureQueue.addAll(positions)
+                clusters.add(ClusterWork(positions, carverQueue, featureQueue))
             }
-            DimensionWork(key, dimId, carverQueue, featureQueue)
+            DimensionWork(key, dimId, clusters)
         }
         val chunksPerDim = sampledPositions.size
         val totalChunks = chunksPerDim * dimWork.size
@@ -221,32 +243,7 @@ object SteelExtractor : ModInitializer {
                     return@register
                 }
 
-                val (queue, status, batchSize) = if (dim.carverQueue.isNotEmpty()) {
-                    Triple(dim.carverQueue, ChunkStatus.CARVERS, CARVER_CHUNKS_PER_TICK)
-                } else {
-                    Triple(dim.featureQueue, ChunkStatus.FEATURES, FEATURE_CHUNKS_PER_TICK)
-                }
-
-                var generatedThisTick = 0
-                while (queue.isNotEmpty() && generatedThisTick < batchSize) {
-                    val pos = queue.removeFirst()
-                    level.getChunk(pos.x, pos.z, status, true)
-                    generatedThisTick++
-                }
-
-                val carverProgress = chunksPerDim - dim.carverQueue.size
-                val featureProgress = chunksPerDim - dim.featureQueue.size
-                val dimProgress = carverProgress + featureProgress
-                val overallProgress = currentDimIdx * chunksPerDim * 2 + dimProgress
-                logger.info("Chunk generation progress: $overallProgress/$totalChunkSteps (${dim.dimId}: carvers $carverProgress/$chunksPerDim, features $featureProgress/$chunksPerDim)")
-
-                if (dim.carverQueue.isEmpty() && dim.featureQueue.isEmpty()) {
-                    // Mark any chunks loaded from disk as ready
-                    for (pos in sampledPositions) {
-                        if (ChunkStageHashStorage.markReady(pos, dim.dimId)) {
-                            manuallyMarked++
-                        }
-                    }
+                val cluster = dim.clusters.firstOrNull() ?: run {
                     logger.info("Finished generating chunks for ${dim.dimId}")
                     currentDimIdx++
                     if (currentDimIdx >= dimWork.size) {
@@ -256,6 +253,44 @@ object SteelExtractor : ModInitializer {
                         allGenerationDone = true
                         logger.info("All chunk generation complete, waiting for all stages...")
                     }
+                    return@register
+                }
+
+                val (queue, status, batchSize) = if (cluster.carverQueue.isNotEmpty()) {
+                    Triple(cluster.carverQueue, ChunkStatus.CARVERS, CARVER_CHUNKS_PER_TICK)
+                } else {
+                    Triple(cluster.featureQueue, ChunkStatus.FEATURES, FEATURE_CHUNKS_PER_TICK)
+                }
+
+                var generatedThisTick = 0
+                while (queue.isNotEmpty() && generatedThisTick < batchSize) {
+                    val pos = queue.removeFirst()
+                    val chunk = level.getChunk(pos.x, pos.z, status, true)
+                    if (status == ChunkStatus.FEATURES) {
+                        if (chunk != null) {
+                            cluster.featureChunks[pos] = chunk
+                        }
+                        dim.featureProgress++
+                    } else {
+                        dim.carverProgress++
+                    }
+                    generatedThisTick++
+                }
+
+                val dimProgress = dim.carverProgress + dim.featureProgress
+                val overallProgress = currentDimIdx * chunksPerDim * 2 + dimProgress
+                val clusterNumber = NUM_CLUSTERS - dim.clusters.size + 1
+                logger.info("Chunk generation progress: $overallProgress/$totalChunkSteps (${dim.dimId}: cluster $clusterNumber/$NUM_CLUSTERS, carvers ${dim.carverProgress}/$chunksPerDim, features ${dim.featureProgress}/$chunksPerDim)")
+
+                if (cluster.carverQueue.isEmpty() && cluster.featureQueue.isEmpty()) {
+                    // Mark any chunks loaded from disk as ready.
+                    for (pos in cluster.positions) {
+                        if (ChunkStageHashStorage.markReady(pos, dim.dimId)) {
+                            manuallyMarked++
+                        }
+                    }
+                    chunkStageExtractor.captureFinalFeatureHashes(server, dim.dimId, cluster.positions, cluster.featureChunks)
+                    dim.clusters.removeFirst()
                 }
 
                 return@register

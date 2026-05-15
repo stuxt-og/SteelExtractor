@@ -69,6 +69,10 @@ object ChunkStageHashStorage {
         return blockData.toMap()
     }
 
+    fun getTrackedChunks(): Set<DimChunkPos> {
+        return trackedChunks.toSet()
+    }
+
     fun getReadyCount(): Int = readyChunks.size
     fun getTrackedCount(): Int = trackedChunks.size
 

@@ -6,6 +6,10 @@ import com.google.gson.JsonObject
 import com.steelextractor.ChunkStageHashStorage
 import com.steelextractor.SteelExtractor
 import net.minecraft.server.MinecraftServer
+import net.minecraft.world.level.ChunkPos
+import net.minecraft.world.level.Level
+import net.minecraft.world.level.chunk.ChunkAccess
+import net.minecraft.world.level.chunk.status.ChunkStatus
 import org.slf4j.LoggerFactory
 import java.io.DataOutputStream
 import java.nio.file.Files
@@ -27,6 +31,7 @@ class ChunkStageHashes : SteelExtractor.Extractor {
         json.addProperty("chunk_sample_seed", SteelExtractor.CHUNK_SAMPLE_SEED)
         json.addProperty("num_chunks", SteelExtractor.NUM_SAMPLE_CHUNKS)
         json.addProperty("chunk_generation_order", "x_z_ascending")
+        json.addProperty("feature_hash_capture", "after_all_tracked_features_ready")
         json.addProperty("biome_tie_breaker", "vanilla_rtree_chunk_local_cache")
 
         if (worldSeed != 13579L) {
@@ -67,6 +72,55 @@ class ChunkStageHashes : SteelExtractor.Extractor {
 
         json.add("dimensions", dimensionsJson)
         return json
+    }
+
+    fun captureFinalFeatureHashes(
+        server: MinecraftServer,
+        dimension: String,
+        positions: Collection<ChunkPos>,
+        featureChunks: Map<ChunkPos, ChunkAccess>
+    ) {
+        val positionSet = positions.toSet()
+        val trackedChunks = ChunkStageHashStorage.getTrackedChunks()
+            .filter { it.dimension == dimension && positionSet.contains(it.pos) }
+            .sortedWith(compareBy({ it.pos.x }, { it.pos.z }))
+        if (trackedChunks.isEmpty()) {
+            return
+        }
+
+        val levelKey = when (dimension) {
+            "minecraft:overworld" -> Level.OVERWORLD
+            "minecraft:the_nether" -> Level.NETHER
+            "minecraft:the_end" -> Level.END
+            else -> {
+                logger.warn("Cannot capture final feature hashes for unknown dimension $dimension")
+                return
+            }
+        }
+        val level = server.getLevel(levelKey) ?: run {
+            logger.warn("Cannot capture final feature hashes for missing level $dimension")
+            return
+        }
+
+        var captured = 0
+        for (tracked in trackedChunks) {
+            val chunk = featureChunks[tracked.pos] ?: level.getChunk(tracked.pos.x, tracked.pos.z, ChunkStatus.FEATURES, false)
+            if (chunk == null) {
+                logger.warn("Tracked chunk ${tracked.pos} in $dimension is not loaded at FEATURES; skipping final feature hash")
+                continue
+            }
+
+            if (ChunkStageHashStorage.enableBinaryDump) {
+                val result = ChunkStageHashStorage.computeBlockHashWithData(chunk.sections.asIterable())
+                ChunkStageHashStorage.storeHash(tracked.pos, dimension, ChunkStatus.FEATURES.toString(), result.hash)
+                ChunkStageHashStorage.storeBlockData(tracked.pos, dimension, ChunkStatus.FEATURES.toString(), result.sectionData)
+            } else {
+                val hash = ChunkStageHashStorage.computeBlockHash(chunk.sections.asIterable())
+                ChunkStageHashStorage.storeHash(tracked.pos, dimension, ChunkStatus.FEATURES.toString(), hash)
+            }
+            captured++
+        }
+        logger.info("Captured final feature hashes for $captured/${trackedChunks.size} chunks in $dimension")
     }
 
     /**
