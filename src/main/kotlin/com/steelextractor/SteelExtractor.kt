@@ -153,7 +153,6 @@ object SteelExtractor : ModInitializer {
             StructureStarts(),
             Strippables(),
             Weathering(),
-            PoiTypesExtractor(),
             CandleCakes(),
             Waxables(),
             PoiTypesExtractor()
@@ -344,7 +343,12 @@ object SteelExtractor : ModInitializer {
                             manuallyMarked++
                         }
                     }
-                    chunkStageExtractor.captureFinalFeatureHashes(server, dim.dimId, cluster.positions, cluster.featureChunks)
+                    chunkStageExtractor.captureFinalFeatureHashes(
+                        server,
+                        dim.dimId,
+                        cluster.positions,
+                        cluster.featureChunks
+                    )
                     dim.clusters.removeFirst()
                 }
 

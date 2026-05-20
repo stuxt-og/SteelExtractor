@@ -16,7 +16,15 @@ class CandleCakes : SteelExtractor.Extractor {
     override fun extract(server: MinecraftServer): JsonElement {
         val field = CandleCakeBlock::class.java.getDeclaredField("BY_CANDLE")
         field.isAccessible = true
-        @Suppress("UNCHECKED_CAST") val BY_CANDLES: Map<CandleBlock, CandleCakeBlock> = field.get(null) as Map<CandleBlock, CandleCakeBlock>
-        return JsonObject().apply { BY_CANDLES.forEach { (key, value) -> addProperty(BuiltInRegistries.BLOCK.getKey(key).path, BuiltInRegistries.BLOCK.getKey(value).path, ) } }
+        @Suppress("UNCHECKED_CAST") val BY_CANDLES: Map<CandleBlock, CandleCakeBlock> =
+            field.get(null) as Map<CandleBlock, CandleCakeBlock>
+        return JsonObject().apply {
+            BY_CANDLES.forEach { (key, value) ->
+                addProperty(
+                    BuiltInRegistries.BLOCK.getKey(key).path,
+                    BuiltInRegistries.BLOCK.getKey(value).path,
+                )
+            }
+        }
     }
 }
