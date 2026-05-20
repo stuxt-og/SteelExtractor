@@ -19,6 +19,7 @@ import com.steelextractor.extractors.SoundEvents
 import com.steelextractor.extractors.SoundTypes
 import com.steelextractor.extractors.MultiNoiseBiomeParameters
 import com.steelextractor.extractors.BiomeHashes
+import com.steelextractor.extractors.CandleCakes
 import com.steelextractor.extractors.ChunkStageHashes
 import com.steelextractor.extractors.Weathering
 import com.steelextractor.extractors.Strippables
@@ -152,6 +153,7 @@ object SteelExtractor : ModInitializer {
             StructureStarts(),
             Strippables(),
             Weathering(),
+            CandleCakes(),
             Waxables(),
             PoiTypesExtractor()
         )
@@ -341,7 +343,12 @@ object SteelExtractor : ModInitializer {
                             manuallyMarked++
                         }
                     }
-                    chunkStageExtractor.captureFinalFeatureHashes(server, dim.dimId, cluster.positions, cluster.featureChunks)
+                    chunkStageExtractor.captureFinalFeatureHashes(
+                        server,
+                        dim.dimId,
+                        cluster.positions,
+                        cluster.featureChunks
+                    )
                     dim.clusters.removeFirst()
                 }
 
