@@ -7,6 +7,9 @@ import com.google.gson.JsonObject
 import com.google.gson.JsonPrimitive
 import com.steelextractor.SteelExtractor
 import net.minecraft.core.registries.BuiltInRegistries
+import net.minecraft.core.Holder
+import net.minecraft.core.particles.ColorParticleOption
+import net.minecraft.core.particles.ParticleOptions
 import net.minecraft.network.syncher.EntityDataAccessor
 import net.minecraft.network.syncher.EntityDataSerializers
 import net.minecraft.network.syncher.SynchedEntityData
@@ -19,6 +22,7 @@ import net.minecraft.world.entity.EntityType
 import net.minecraft.world.entity.LivingEntity
 import net.minecraft.world.entity.Pose
 import net.minecraft.world.entity.player.Player
+import net.minecraft.world.entity.npc.villager.VillagerData
 import net.minecraft.world.entity.ai.attributes.Attributes
 import net.minecraft.world.entity.ai.attributes.DefaultAttributes
 import net.minecraft.world.entity.boss.enderdragon.EnderDragon
@@ -44,6 +48,8 @@ class Entities : SteelExtractor.Extractor {
     private val dataItemClass = Class.forName("net.minecraft.network.syncher.SynchedEntityData\$DataItem")
     private val accessorField: Field = dataItemClass.getDeclaredField("accessor").apply { isAccessible = true }
     private val initialValueField: Field = dataItemClass.getDeclaredField("initialValue").apply { isAccessible = true }
+    private val colorParticleColorField: Field =
+        ColorParticleOption::class.java.getDeclaredField("color").apply { isAccessible = true }
 
     // Build serializer name lookup
     private val serializerNames: Map<Int, String> by lazy {
@@ -584,7 +590,10 @@ class Entities : SteelExtractor.Extractor {
                 JsonPrimitive(value.string)
             }
 
-            is net.minecraft.core.Holder<*> -> {
+            is ParticleOptions -> serializeParticleOptions(value)
+            is VillagerData -> serializeVillagerData(value)
+
+            is Holder<*> -> {
                 val key = value.unwrapKey()
                 if (key.isPresent) {
                     JsonPrimitive(key.get().identifier().toString())
@@ -621,5 +630,40 @@ class Entities : SteelExtractor.Extractor {
             is Enum<*> -> JsonPrimitive(value.name)
             else -> JsonPrimitive(value::class.java.simpleName)
         }
+    }
+
+    private fun serializeParticleOptions(value: ParticleOptions): JsonElement {
+        val typeKey = BuiltInRegistries.PARTICLE_TYPE.getKey(value.type)
+            ?: error("Particle options default has unregistered type: ${value.type}")
+        val obj = JsonObject()
+        obj.addProperty("type", typeKey.toString())
+
+        val options = JsonObject()
+        when (value) {
+            is ColorParticleOption -> {
+                options.addProperty("kind", "color")
+                options.addProperty("color", colorParticleColorField.getInt(value))
+            }
+
+            else -> {
+                options.addProperty("kind", "none")
+            }
+        }
+        obj.add("options", options)
+        return obj
+    }
+
+    private fun serializeVillagerData(value: VillagerData): JsonElement {
+        val obj = JsonObject()
+        obj.addProperty("type", holderKey(value.type()))
+        obj.addProperty("profession", holderKey(value.profession()))
+        obj.addProperty("level", value.level())
+        return obj
+    }
+
+    private fun holderKey(holder: Holder<*>): String {
+        return holder.unwrapKey()
+            .map { key -> key.identifier().toString() }
+            .orElseThrow { IllegalStateException("Default holder has no registry key: $holder") }
     }
 }

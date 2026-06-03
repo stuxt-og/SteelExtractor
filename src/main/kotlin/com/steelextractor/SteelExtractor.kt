@@ -11,6 +11,7 @@ import com.steelextractor.extractors.EntityEvents
 import com.steelextractor.extractors.Fluids
 import com.steelextractor.extractors.GameRulesExtractor
 import com.steelextractor.extractors.Items
+import com.steelextractor.extractors.ParticleTypeRegistryExtractor
 import com.steelextractor.extractors.MenuTypes
 import com.steelextractor.extractors.MobEffects
 import com.steelextractor.extractors.Packets
@@ -19,6 +20,8 @@ import com.steelextractor.extractors.SoundEvents
 import com.steelextractor.extractors.SoundTypes
 import com.steelextractor.extractors.MultiNoiseBiomeParameters
 import com.steelextractor.extractors.BiomeHashes
+import com.steelextractor.extractors.VillagerProfessionRegistryExtractor
+import com.steelextractor.extractors.VillagerTypeRegistryExtractor
 import com.steelextractor.extractors.CandleCakes
 import com.steelextractor.extractors.ChunkStageHashes
 import com.steelextractor.extractors.GameEvents
@@ -135,6 +138,9 @@ object SteelExtractor : ModInitializer {
             Blocks(),
             BlockEntities(),
             Items(),
+            ParticleTypeRegistryExtractor(),
+            VillagerTypeRegistryExtractor(),
+            VillagerProfessionRegistryExtractor(),
             Packets(),
             MenuTypes(),
             Entities(),
