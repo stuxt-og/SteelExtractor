@@ -25,16 +25,48 @@ import net.minecraft.world.phys.shapes.CollisionContext
 import org.slf4j.LoggerFactory
 import java.lang.reflect.Field
 import java.util.*
+import kotlin.math.abs
 
 class Blocks : SteelExtractor.Extractor {
     private val logger = LoggerFactory.getLogger("steel-extractor-blocks")
     private val shapes: LinkedHashMap<AABB, Int> = LinkedHashMap()
+
+    private enum class OffsetType {
+        NONE,
+        XZ,
+        XYZ,
+    }
 
     private data class StateLightProperties(
         val lightEmission: Int,
         val lightDampening: Int,
         val useShapeForLightOcclusion: Boolean,
     )
+
+    private data class ShapeData(
+        val defaultAabbs: List<AABB>,
+        val defaultIdxs: JsonArray,
+        val shapeMap: LinkedHashMap<List<AABB>, JsonArray>,
+    )
+
+    private data class ShapeChannel(
+        val jsonName: String,
+        val displayName: String,
+        val shapeExtractor: (BlockState, BlockPos) -> List<AABB>,
+    )
+
+    companion object {
+        private const val AABB_EPSILON = 1.0e-9
+        private const val OFFSET_EPSILON = 1.0e-9
+
+        private val OFFSET_PROBE_POSITIONS = listOf(
+            BlockPos.ZERO,
+            BlockPos(1, 0, 0),
+            BlockPos(0, 0, 1),
+            BlockPos(7, 0, 11),
+            BlockPos(-13, 0, 5),
+        )
+    }
 
 
     override fun fileName(): String {
@@ -84,6 +116,105 @@ class Blocks : SteelExtractor.Extractor {
         }
     }
 
+    private fun getProtectedFloatMethodValue(obj: Any, methodName: String): Float {
+        var clazz: Class<*>? = obj.javaClass
+        while (clazz != null) {
+            try {
+                val method = clazz.getDeclaredMethod(methodName)
+                method.isAccessible = true
+                return method.invoke(obj) as Float
+            } catch (_: NoSuchMethodException) {
+                clazz = clazz.superclass
+            }
+        }
+        throw IllegalArgumentException("Method '$methodName' not found in ${obj.javaClass.simpleName}")
+    }
+
+    private fun getOffsetType(block: Block): OffsetType {
+        val state = block.defaultBlockState()
+        if (!state.hasOffsetFunction()) {
+            return OffsetType.NONE
+        }
+
+        for (pos in OFFSET_PROBE_POSITIONS) {
+            if (abs(state.getOffset(pos).y) > OFFSET_EPSILON) {
+                return OffsetType.XYZ
+            }
+        }
+
+        return OffsetType.XZ
+    }
+
+    private fun movedAabbEquals(actual: AABB, base: AABB, dx: Double, dy: Double, dz: Double): Boolean {
+        return abs(actual.minX - (base.minX + dx)) <= AABB_EPSILON
+                && abs(actual.minY - (base.minY + dy)) <= AABB_EPSILON
+                && abs(actual.minZ - (base.minZ + dz)) <= AABB_EPSILON
+                && abs(actual.maxX - (base.maxX + dx)) <= AABB_EPSILON
+                && abs(actual.maxY - (base.maxY + dy)) <= AABB_EPSILON
+                && abs(actual.maxZ - (base.maxZ + dz)) <= AABB_EPSILON
+    }
+
+    private fun shapesEqualAfterMove(base: List<AABB>, actual: List<AABB>, dx: Double, dy: Double, dz: Double): Boolean {
+        if (base.size != actual.size) {
+            return false
+        }
+
+        return base.zip(actual).all { (baseBox, actualBox) ->
+            movedAabbEquals(actualBox, baseBox, dx, dy, dz)
+        }
+    }
+
+    private fun shapeChannelUsesOffset(
+        possibleStates: List<BlockState>,
+        shapeExtractor: (BlockState, BlockPos) -> List<AABB>,
+    ): Boolean {
+        for (state in possibleStates) {
+            if (!state.hasOffsetFunction()) {
+                continue
+            }
+
+            val basePos = BlockPos.ZERO
+            val baseOffset = state.getOffset(basePos)
+            val baseShape = shapeExtractor(state, basePos)
+
+            for (probePos in OFFSET_PROBE_POSITIONS) {
+                val probeOffset = state.getOffset(probePos)
+                val dx = probeOffset.x - baseOffset.x
+                val dy = probeOffset.y - baseOffset.y
+                val dz = probeOffset.z - baseOffset.z
+                if (abs(dx) <= OFFSET_EPSILON && abs(dy) <= OFFSET_EPSILON && abs(dz) <= OFFSET_EPSILON) {
+                    continue
+                }
+
+                val probeShape = shapeExtractor(state, probePos)
+                if (baseShape.isEmpty() && probeShape.isEmpty()) {
+                    continue
+                }
+
+                if (shapesEqualAfterMove(baseShape, probeShape, dx, dy, dz)) {
+                    return true
+                }
+            }
+        }
+
+        return false
+    }
+
+    private fun normalizeShapeAabbs(
+        state: BlockState,
+        pos: BlockPos,
+        usesOffset: Boolean,
+        shapeExtractor: (BlockState, BlockPos) -> List<AABB>,
+    ): List<AABB> {
+        val shapeAabbs = shapeExtractor(state, pos)
+        if (!usesOffset || shapeAabbs.isEmpty()) {
+            return shapeAabbs
+        }
+
+        val offset = state.getOffset(pos)
+        return shapeAabbs.map { box -> box.move(-offset.x, -offset.y, -offset.z) }
+    }
+
     /**
      * Computes shape data (default + overwrites) for a given shape extractor function.
      * Returns the default AABBs, their top-level shape indices, and the deduplicated
@@ -91,13 +222,14 @@ class Blocks : SteelExtractor.Extractor {
      */
     private fun computeShapeData(
         possibleStates: List<BlockState>,
-        shapeExtractor: (BlockState) -> List<AABB>
-    ): Triple<List<AABB>, JsonArray, LinkedHashMap<List<AABB>, JsonArray>> {
+        usesOffset: Boolean,
+        shapeExtractor: (BlockState, BlockPos) -> List<AABB>,
+    ): ShapeData {
         val shapeCounts = LinkedHashMap<List<AABB>, Int>()
         val shapeMap = LinkedHashMap<List<AABB>, JsonArray>()
 
         for (state in possibleStates) {
-            val shapeAabbs = shapeExtractor(state)
+            val shapeAabbs = normalizeShapeAabbs(state, BlockPos.ZERO, usesOffset, shapeExtractor)
             val currentShapeJsonArray = JsonArray()
             for (box in shapeAabbs) {
                 val idx = shapes.putIfAbsent(box, shapes.size)
@@ -111,9 +243,9 @@ class Blocks : SteelExtractor.Extractor {
         val mostFrequentEntry = shapeCounts.maxByOrNull { it.value }
 
         return if (mostFrequentEntry != null) {
-            Triple(mostFrequentEntry.key, shapeMap[mostFrequentEntry.key]!!, shapeMap)
+            ShapeData(mostFrequentEntry.key, shapeMap[mostFrequentEntry.key]!!, shapeMap)
         } else {
-            Triple(emptyList(), JsonArray(), shapeMap)
+            ShapeData(emptyList(), JsonArray(), shapeMap)
         }
     }
 
@@ -125,8 +257,9 @@ class Blocks : SteelExtractor.Extractor {
         return !current.zip(default).all { (c, d) -> c == d }
     }
 
-    private fun emptyShapeDataJson(): JsonObject {
+    private fun emptyShapeDataJson(usesOffset: Boolean = false): JsonObject {
         val shapeJson = JsonObject()
+        shapeJson.addProperty("usesOffset", usesOffset)
         shapeJson.add("default", JsonArray())
         shapeJson.add("overwrites", JsonArray())
         return shapeJson
@@ -134,23 +267,23 @@ class Blocks : SteelExtractor.Extractor {
 
     private fun buildShapeDataJson(
         possibleStates: List<BlockState>,
-        defaultAabbs: List<AABB>,
-        defaultIdxs: JsonArray,
-        shapeMap: LinkedHashMap<List<AABB>, JsonArray>,
+        shapeData: ShapeData,
+        usesOffset: Boolean,
         shapeName: String,
-        shapeExtractor: (BlockState) -> List<AABB>
+        shapeExtractor: (BlockState, BlockPos) -> List<AABB>,
     ): JsonObject {
         val shapeJson = JsonObject()
-        shapeJson.add("default", defaultIdxs)
+        shapeJson.addProperty("usesOffset", usesOffset)
+        shapeJson.add("default", shapeData.defaultIdxs)
 
         val overwrites = JsonArray()
         for (i in possibleStates.indices) {
             val state = possibleStates[i]
-            val currentAabbs = shapeExtractor(state)
+            val currentAabbs = normalizeShapeAabbs(state, BlockPos.ZERO, usesOffset, shapeExtractor)
 
-            if (shapesDiffer(currentAabbs, defaultAabbs)) {
+            if (shapesDiffer(currentAabbs, shapeData.defaultAabbs)) {
                 val overwrite = JsonObject()
-                val shapeIdxs = shapeMap[currentAabbs] ?: run {
+                val shapeIdxs = shapeData.shapeMap[currentAabbs] ?: run {
                     logger.error("$shapeName shape not found in map for state offset $i. Recalculating.")
                     val tempArray = JsonArray()
                     for (box in currentAabbs) {
@@ -182,72 +315,41 @@ class Blocks : SteelExtractor.Extractor {
             return resultJson
         }
 
-        // Compute collision shapes
-        val (defaultCollisionAabbs, defaultCollisionIdxs, collisionMap) = computeShapeData(possibleStates) { state ->
-            state.getCollisionShape(EmptyBlockGetter.INSTANCE, BlockPos.ZERO).toAabbs()
-        }
-
-        // Compute outline shapes
-        val (defaultOutlineAabbs, defaultOutlineIdxs, outlineMap) = computeShapeData(possibleStates) { state ->
-            state.getShape(EmptyBlockGetter.INSTANCE, BlockPos.ZERO).toAabbs()
-        }
-
-        // Compute support shapes
-        val (defaultSupportAabbs, defaultSupportIdxs, supportMap) = computeShapeData(possibleStates) { state ->
-            state.getBlockSupportShape(EmptyBlockGetter.INSTANCE, BlockPos.ZERO).toAabbs()
-        }
-
-        // Compute occlusion shapes
-        val (defaultOcclusionAabbs, defaultOcclusionIdxs, occlusionMap) = computeShapeData(possibleStates) { state ->
-            state.getOcclusionShape().toAabbs()
-        }
-
-        // Compute interaction shapes
-        val (defaultInteractionAabbs, defaultInteractionIdxs, interactionMap) = computeShapeData(possibleStates) { state ->
-            state.getInteractionShape(EmptyBlockGetter.INSTANCE, BlockPos.ZERO).toAabbs()
-        }
-
-        // Compute visual shapes
-        val (defaultVisualAabbs, defaultVisualIdxs, visualMap) = computeShapeData(possibleStates) { state ->
-            state.getVisualShape(EmptyBlockGetter.INSTANCE, BlockPos.ZERO, CollisionContext.empty()).toAabbs()
-        }
-
-        resultJson.add(
-            "collision_shapes",
-            buildShapeDataJson(possibleStates, defaultCollisionAabbs, defaultCollisionIdxs, collisionMap, "Collision") { state ->
-                state.getCollisionShape(EmptyBlockGetter.INSTANCE, BlockPos.ZERO).toAabbs()
-            }
-        )
-        resultJson.add(
-            "support_shapes",
-            buildShapeDataJson(possibleStates, defaultSupportAabbs, defaultSupportIdxs, supportMap, "Support") { state ->
-                state.getBlockSupportShape(EmptyBlockGetter.INSTANCE, BlockPos.ZERO).toAabbs()
-            }
-        )
-        resultJson.add(
-            "outline_shapes",
-            buildShapeDataJson(possibleStates, defaultOutlineAabbs, defaultOutlineIdxs, outlineMap, "Outline") { state ->
-                state.getShape(EmptyBlockGetter.INSTANCE, BlockPos.ZERO).toAabbs()
-            }
-        )
-        resultJson.add(
-            "occlusion_shapes",
-            buildShapeDataJson(possibleStates, defaultOcclusionAabbs, defaultOcclusionIdxs, occlusionMap, "Occlusion") { state ->
+        val channels = listOf(
+            ShapeChannel("collision_shapes", "Collision") { state, pos ->
+                state.getCollisionShape(EmptyBlockGetter.INSTANCE, pos).toAabbs()
+            },
+            ShapeChannel("support_shapes", "Support") { state, pos ->
+                state.getBlockSupportShape(EmptyBlockGetter.INSTANCE, pos).toAabbs()
+            },
+            ShapeChannel("outline_shapes", "Outline") { state, pos ->
+                state.getShape(EmptyBlockGetter.INSTANCE, pos).toAabbs()
+            },
+            ShapeChannel("occlusion_shapes", "Occlusion") { state, _ ->
                 state.getOcclusionShape().toAabbs()
-            }
+            },
+            ShapeChannel("interaction_shapes", "Interaction") { state, pos ->
+                state.getInteractionShape(EmptyBlockGetter.INSTANCE, pos).toAabbs()
+            },
+            ShapeChannel("visual_shapes", "Visual") { state, pos ->
+                state.getVisualShape(EmptyBlockGetter.INSTANCE, pos, CollisionContext.empty()).toAabbs()
+            },
         )
-        resultJson.add(
-            "interaction_shapes",
-            buildShapeDataJson(possibleStates, defaultInteractionAabbs, defaultInteractionIdxs, interactionMap, "Interaction") { state ->
-                state.getInteractionShape(EmptyBlockGetter.INSTANCE, BlockPos.ZERO).toAabbs()
-            }
-        )
-        resultJson.add(
-            "visual_shapes",
-            buildShapeDataJson(possibleStates, defaultVisualAabbs, defaultVisualIdxs, visualMap, "Visual") { state ->
-                state.getVisualShape(EmptyBlockGetter.INSTANCE, BlockPos.ZERO, CollisionContext.empty()).toAabbs()
-            }
-        )
+
+        for (channel in channels) {
+            val usesOffset = shapeChannelUsesOffset(possibleStates, channel.shapeExtractor)
+            val shapeData = computeShapeData(possibleStates, usesOffset, channel.shapeExtractor)
+            resultJson.add(
+                channel.jsonName,
+                buildShapeDataJson(
+                    possibleStates,
+                    shapeData,
+                    usesOffset,
+                    channel.displayName,
+                    channel.shapeExtractor,
+                )
+            )
+        }
 
         return resultJson
     }
@@ -355,6 +457,9 @@ class Blocks : SteelExtractor.Extractor {
             behaviourJson.addProperty("speedFactor", getPrivateFieldValue<Float>(behaviourProps, "speedFactor"))
             behaviourJson.addProperty("jumpFactor", getPrivateFieldValue<Float>(behaviourProps, "jumpFactor"))
             behaviourJson.addProperty("dynamicShape", getPrivateFieldValue<Boolean>(behaviourProps, "dynamicShape"))
+            behaviourJson.addProperty("offsetType", getOffsetType(block).name)
+            behaviourJson.addProperty("maxHorizontalOffset", getProtectedFloatMethodValue(block, "getMaxHorizontalOffset"))
+            behaviourJson.addProperty("maxVerticalOffset", getProtectedFloatMethodValue(block, "getMaxVerticalOffset"))
 
             behaviourJson.addProperty("destroyTime", getPrivateFieldValue<Float>(behaviourProps, "destroyTime"))
             behaviourJson.addProperty(
