@@ -30,6 +30,7 @@ import org.slf4j.LoggerFactory
 import java.lang.reflect.Field
 import java.util.UUID
 import com.mojang.authlib.GameProfile
+import net.minecraft.world.entity.EntityTypes
 
 class Entities : SteelExtractor.Extractor {
     private val logger = LoggerFactory.getLogger("steel-extractor-entities")
@@ -176,7 +177,7 @@ class Entities : SteelExtractor.Extractor {
                 entity.discard()
             } else {
                 // Entity can't be instantiated (e.g., Player).
-                if (entityType == EntityType.PLAYER) {
+                if (entityType == EntityTypes.PLAYER) {
                     val fakePlayer = createFakeServerPlayer(server = world.server)
                     if (fakePlayer != null) {
                         writeSynchedDataFromEntity(fakePlayer, Player::class.java, synchedDataJson)
@@ -302,7 +303,7 @@ class Entities : SteelExtractor.Extractor {
         if (entity != null) {
             return entity.javaClass
         }
-        if (entityType == EntityType.PLAYER) {
+        if (entityType == EntityTypes.PLAYER) {
             return Player::class.java
         }
         return null

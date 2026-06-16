@@ -10,6 +10,7 @@ import net.minecraft.sounds.SoundEvent
 import net.minecraft.world.entity.Entity
 import net.minecraft.world.entity.EntitySpawnReason
 import net.minecraft.world.entity.EntityType
+import net.minecraft.world.entity.EntityTypes
 import net.minecraft.world.entity.player.Player
 import net.minecraft.world.item.Item
 import net.minecraft.world.level.block.Block
@@ -87,7 +88,7 @@ class Classes : SteelExtractor.Extractor {
         if (entity != null) {
             return entity.javaClass
         }
-        if (entityType == EntityType.PLAYER) {
+        if (entityType == EntityTypes.PLAYER) {
             return Player::class.java
         }
         return entityType.baseClass
