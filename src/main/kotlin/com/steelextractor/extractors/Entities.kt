@@ -7,6 +7,10 @@ import com.google.gson.JsonObject
 import com.google.gson.JsonPrimitive
 import com.steelextractor.SteelExtractor
 import net.minecraft.core.registries.BuiltInRegistries
+import net.minecraft.core.Holder
+import net.minecraft.core.particles.ColorParticleOption
+import net.minecraft.core.particles.ParticleOptions
+import net.minecraft.network.syncher.EntityDataAccessor
 import net.minecraft.network.syncher.EntityDataSerializers
 import net.minecraft.network.syncher.SynchedEntityData
 import net.minecraft.server.MinecraftServer
@@ -17,6 +21,8 @@ import net.minecraft.world.entity.EntityAttachment
 import net.minecraft.world.entity.EntityType
 import net.minecraft.world.entity.LivingEntity
 import net.minecraft.world.entity.Pose
+import net.minecraft.world.entity.player.Player
+import net.minecraft.world.entity.npc.villager.VillagerData
 import net.minecraft.world.entity.ai.attributes.Attributes
 import net.minecraft.world.entity.ai.attributes.DefaultAttributes
 import net.minecraft.world.entity.boss.enderdragon.EnderDragon
@@ -24,9 +30,17 @@ import org.slf4j.LoggerFactory
 import java.lang.reflect.Field
 import java.util.UUID
 import com.mojang.authlib.GameProfile
+import net.minecraft.world.entity.EntityTypes
 
 class Entities : SteelExtractor.Extractor {
     private val logger = LoggerFactory.getLogger("steel-extractor-entities")
+
+    private data class SynchedAccessorInfo(
+        val accessor: EntityDataAccessor<*>,
+        val fieldName: String,
+        val declaringClass: Class<*>,
+        val rawFieldName: String
+    )
 
     // Cache reflection fields
     private val entityDataField: Field = Entity::class.java.getDeclaredField("entityData").apply { isAccessible = true }
@@ -35,6 +49,8 @@ class Entities : SteelExtractor.Extractor {
     private val dataItemClass = Class.forName("net.minecraft.network.syncher.SynchedEntityData\$DataItem")
     private val accessorField: Field = dataItemClass.getDeclaredField("accessor").apply { isAccessible = true }
     private val initialValueField: Field = dataItemClass.getDeclaredField("initialValue").apply { isAccessible = true }
+    private val colorParticleColorField: Field =
+        ColorParticleOption::class.java.getDeclaredField("color").apply { isAccessible = true }
 
     // Build serializer name lookup
     private val serializerNames: Map<Int, String> by lazy {
@@ -92,6 +108,12 @@ class Entities : SteelExtractor.Extractor {
                     null
                 }
 
+                val entityClass = entityJavaClass(entityType, entity)
+                if (entityClass != null) {
+                    entityTypeJson.addProperty("java_class", entityClass.name)
+                    entityTypeJson.add("class_hierarchy", extractClassHierarchy(entityClass))
+                }
+
                 // Extract baby dimensions for ageable entities
                 if (entity is LivingEntity) {
                     entityTypeJson.add("baby_dimensions", extractBabyDimensions(entity))
@@ -115,6 +137,7 @@ class Entities : SteelExtractor.Extractor {
                 // Flags
                 entityTypeJson.addProperty("fire_immune", entityType.fireImmune())
                 entityTypeJson.addProperty("summonable", entityType.canSummon())
+                entityTypeJson.addProperty("allowed_in_peaceful", entityType.isAllowedInPeaceful())
                 entityTypeJson.addProperty("can_serialize", entityType.canSerialize())
                 entityTypeJson.addProperty("can_spawn_far_from_player", entityType.canSpawnFarFromPlayer())
 
@@ -143,107 +166,183 @@ class Entities : SteelExtractor.Extractor {
     private fun extractSynchedData(
         entityType: EntityType<*>,
         world: net.minecraft.server.level.ServerLevel
-    ): JsonArray {
-        val synchedDataArray = JsonArray()
+    ): JsonObject {
+        val synchedDataJson = JsonObject()
 
         try {
             val entity =
                 (entityType as EntityType<Entity>).create(world, net.minecraft.world.entity.EntitySpawnReason.LOAD)
 
             if (entity != null) {
-                val entityData = entityDataField.get(entity) as SynchedEntityData
-                val itemsById = itemsByIdField.get(entityData) as Array<*>
-
-                // Build a map of accessor ID -> field name by scanning the entity's class hierarchy
-                val accessorNames = getAccessorNames(entity::class.java)
-
-                for (dataItem in itemsById) {
-                    if (dataItem == null) continue
-
-                    val dataItemJson = JsonObject()
-                    val accessor = accessorField.get(dataItem) as net.minecraft.network.syncher.EntityDataAccessor<*>
-                    val serializerId = EntityDataSerializers.getSerializedId(accessor.serializer())
-                    val index = accessor.id()
-
-                    dataItemJson.addProperty("index", index)
-                    dataItemJson.addProperty("name", accessorNames[index]?.second ?: "unknown")
-                    dataItemJson.addProperty("serializer", serializerNames[serializerId] ?: "unknown")
-
-                    val defaultValue = initialValueField.get(dataItem)
-                    dataItemJson.add("default_value", serializeDefaultValue(defaultValue))
-
-                    synchedDataArray.add(dataItemJson)
-                }
-
+                writeSynchedDataFromEntity(entity, entity.javaClass, synchedDataJson)
                 entity.discard()
             } else {
-                // Entity can't be instantiated (e.g., Player)
-                // For Player, create a fake ServerPlayer to get all synched data
-                if (entityType == EntityType.PLAYER) {
+                // Entity can't be instantiated (e.g., Player).
+                if (entityType == EntityTypes.PLAYER) {
                     val fakePlayer = createFakeServerPlayer(server = world.server)
                     if (fakePlayer != null) {
-                        val entityData = entityDataField.get(fakePlayer) as SynchedEntityData
-                        val itemsById = itemsByIdField.get(entityData) as Array<*>
-                        val accessorNames = getAccessorNames(fakePlayer::class.java)
-
-                        for (dataItem in itemsById) {
-                            if (dataItem == null) continue
-
-                            val dataItemJson = JsonObject()
-                            val accessor =
-                                accessorField.get(dataItem) as net.minecraft.network.syncher.EntityDataAccessor<*>
-                            val serializerId = EntityDataSerializers.getSerializedId(accessor.serializer())
-                            val index = accessor.id()
-
-                            dataItemJson.addProperty("index", index)
-                            dataItemJson.addProperty("name", accessorNames[index]?.second ?: "unknown")
-                            dataItemJson.addProperty("serializer", serializerNames[serializerId] ?: "unknown")
-
-                            val defaultValue = initialValueField.get(dataItem)
-                            dataItemJson.add("default_value", serializeDefaultValue(defaultValue))
-
-                            synchedDataArray.add(dataItemJson)
-                        }
-
+                        writeSynchedDataFromEntity(fakePlayer, Player::class.java, synchedDataJson)
                         fakePlayer.discard()
                     }
                 } else {
-                    // Fall back to static extraction of EntityDataAccessor fields
+                    // Fall back to static extraction of EntityDataAccessor fields.
                     val entityClass = entityType.baseClass
-                    val accessorNames = getAccessorNames(entityClass)
-
-                    for ((index, pair) in accessorNames.toSortedMap()) {
-                        val (accessor, name) = pair
-                        val dataItemJson = JsonObject()
-                        val serializerId = EntityDataSerializers.getSerializedId(accessor.serializer())
-
-                        dataItemJson.addProperty("index", index)
-                        dataItemJson.addProperty("name", name)
-                        dataItemJson.addProperty("serializer", serializerNames[serializerId] ?: "unknown")
-
-                        synchedDataArray.add(dataItemJson)
-                    }
+                    writeStaticSynchedData(entityClass, synchedDataJson)
                 }
             }
         } catch (e: Exception) {
             logger.warn("Failed to extract synched data: ${e.message}")
         }
 
-        return synchedDataArray
+        return synchedDataJson
     }
 
-    private fun getAccessorNames(entityClass: Class<*>): Map<Int, Pair<net.minecraft.network.syncher.EntityDataAccessor<*>, String>> {
-        val accessors = mutableMapOf<Int, Pair<net.minecraft.network.syncher.EntityDataAccessor<*>, String>>()
+    private fun writeSynchedDataFromEntity(
+        entity: Entity,
+        dataClass: Class<out Entity>,
+        output: JsonObject
+    ) {
+        val entityData = entityDataField.get(entity) as SynchedEntityData
+        val itemsById = itemsByIdField.get(entityData) as Array<*>
+        val accessorNames = getAccessorNames(dataClass)
+        val fieldsByClass = linkedMapOf<Class<*>, MutableList<JsonObject>>()
+        val unresolvedFields = JsonArray()
+
+        for (dataItem in itemsById) {
+            if (dataItem == null) continue
+
+            val accessor = accessorField.get(dataItem) as EntityDataAccessor<*>
+            val serializerId = EntityDataSerializers.getSerializedId(accessor.serializer())
+            val index = accessor.id()
+            val accessorInfo = accessorNames[index]
+            val defaultValue = initialValueField.get(dataItem)
+            val fieldJson = synchedFieldJson(
+                index,
+                accessorInfo?.fieldName ?: "unknown",
+                accessorInfo?.rawFieldName,
+                serializerId,
+                defaultValue
+            )
+
+            if (accessorInfo == null) {
+                unresolvedFields.add(fieldJson)
+            } else {
+                fieldsByClass.getOrPut(accessorInfo.declaringClass) { mutableListOf() }.add(fieldJson)
+            }
+        }
+
+        writeSynchedDataLayers(output, dataClass, fieldsByClass, unresolvedFields)
+    }
+
+    private fun writeStaticSynchedData(dataClass: Class<out Entity>, output: JsonObject) {
+        val fieldsByClass = linkedMapOf<Class<*>, MutableList<JsonObject>>()
+        for ((index, accessorInfo) in getAccessorNames(dataClass).toSortedMap()) {
+            val serializerId = EntityDataSerializers.getSerializedId(accessorInfo.accessor.serializer())
+            val fieldJson = synchedFieldJson(
+                index,
+                accessorInfo.fieldName,
+                accessorInfo.rawFieldName,
+                serializerId,
+                null
+            )
+            fieldsByClass.getOrPut(accessorInfo.declaringClass) { mutableListOf() }.add(fieldJson)
+        }
+
+        writeSynchedDataLayers(output, dataClass, fieldsByClass, JsonArray())
+    }
+
+    private fun writeSynchedDataLayers(
+        output: JsonObject,
+        dataClass: Class<out Entity>,
+        fieldsByClass: Map<Class<*>, List<JsonObject>>,
+        unresolvedFields: JsonArray
+    ) {
+        output.addProperty("java_class", dataClass.name)
+        output.add("class_hierarchy", extractClassHierarchy(dataClass))
+
+        val layers = JsonArray()
+        for (clazz in entityClassHierarchy(dataClass)) {
+            val fields = fieldsByClass[clazz] ?: continue
+            val layerJson = JsonObject()
+            layerJson.addProperty("java_class", clazz.name)
+            layerJson.addProperty("simple_name", clazz.simpleName)
+
+            val fieldsJson = JsonArray()
+            for (field in fields.sortedBy { it.get("index").asInt }) {
+                fieldsJson.add(field)
+            }
+            layerJson.add("fields", fieldsJson)
+            layers.add(layerJson)
+        }
+        output.add("layers", layers)
+
+        if (unresolvedFields.size() > 0) {
+            output.add("unresolved_fields", unresolvedFields)
+        }
+    }
+
+    private fun synchedFieldJson(
+        index: Int,
+        fieldName: String,
+        accessorField: String?,
+        serializerId: Int,
+        defaultValue: Any?
+    ): JsonObject {
+        val fieldJson = JsonObject()
+        fieldJson.addProperty("index", index)
+        fieldJson.addProperty("name", fieldName)
+        if (accessorField != null) {
+            fieldJson.addProperty("accessor_field", accessorField)
+        }
+        fieldJson.addProperty("serializer_id", serializerId)
+        fieldJson.addProperty("serializer", serializerNames[serializerId] ?: "unknown")
+        fieldJson.add("default_value", serializeDefaultValue(defaultValue))
+        return fieldJson
+    }
+
+    private fun entityJavaClass(entityType: EntityType<*>, entity: Entity?): Class<out Entity>? {
+        if (entity != null) {
+            return entity.javaClass
+        }
+        if (entityType == EntityTypes.PLAYER) {
+            return Player::class.java
+        }
+        return null
+    }
+
+    private fun entityClassHierarchy(entityClass: Class<*>): List<Class<*>> {
+        val classes = mutableListOf<Class<*>>()
+        var clazz: Class<*>? = entityClass
+        while (clazz != null && Entity::class.java.isAssignableFrom(clazz)) {
+            classes.add(clazz)
+            clazz = clazz.superclass
+        }
+        return classes.asReversed()
+    }
+
+    private fun extractClassHierarchy(entityClass: Class<*>): JsonArray {
+        val hierarchy = JsonArray()
+        for (entry in entityClassHierarchy(entityClass)) {
+            val classJson = JsonObject()
+            classJson.addProperty("java_class", entry.name)
+            classJson.addProperty("simple_name", entry.simpleName)
+            hierarchy.add(classJson)
+        }
+        return hierarchy
+    }
+
+    private fun getAccessorNames(entityClass: Class<*>): Map<Int, SynchedAccessorInfo> {
+        val accessors = mutableMapOf<Int, SynchedAccessorInfo>()
         var clazz: Class<*>? = entityClass
         while (clazz != null && Entity::class.java.isAssignableFrom(clazz)) {
             for (field in clazz.declaredFields) {
-                if (net.minecraft.network.syncher.EntityDataAccessor::class.java.isAssignableFrom(field.type)) {
+                if (EntityDataAccessor::class.java.isAssignableFrom(field.type)) {
                     try {
                         field.isAccessible = true
-                        val accessor = field.get(null) as? net.minecraft.network.syncher.EntityDataAccessor<*>
+                        val accessor = field.get(null) as? EntityDataAccessor<*>
                         if (accessor != null) {
                             val name = field.name.lowercase().removePrefix("data_")
-                            accessors[accessor.id()] = Pair(accessor, name)
+                            accessors[accessor.id()] = SynchedAccessorInfo(accessor, name, clazz, field.name)
                         }
                     } catch (_: Exception) {
                         // Skip non-static or inaccessible fields
@@ -493,7 +592,10 @@ class Entities : SteelExtractor.Extractor {
                 JsonPrimitive(value.string)
             }
 
-            is net.minecraft.core.Holder<*> -> {
+            is ParticleOptions -> serializeParticleOptions(value)
+            is VillagerData -> serializeVillagerData(value)
+
+            is Holder<*> -> {
                 val key = value.unwrapKey()
                 if (key.isPresent) {
                     JsonPrimitive(key.get().identifier().toString())
@@ -530,5 +632,40 @@ class Entities : SteelExtractor.Extractor {
             is Enum<*> -> JsonPrimitive(value.name)
             else -> JsonPrimitive(value::class.java.simpleName)
         }
+    }
+
+    private fun serializeParticleOptions(value: ParticleOptions): JsonElement {
+        val typeKey = BuiltInRegistries.PARTICLE_TYPE.getKey(value.type)
+            ?: error("Particle options default has unregistered type: ${value.type}")
+        val obj = JsonObject()
+        obj.addProperty("type", typeKey.toString())
+
+        val options = JsonObject()
+        when (value) {
+            is ColorParticleOption -> {
+                options.addProperty("kind", "color")
+                options.addProperty("color", colorParticleColorField.getInt(value))
+            }
+
+            else -> {
+                options.addProperty("kind", "none")
+            }
+        }
+        obj.add("options", options)
+        return obj
+    }
+
+    private fun serializeVillagerData(value: VillagerData): JsonElement {
+        val obj = JsonObject()
+        obj.addProperty("type", holderKey(value.type()))
+        obj.addProperty("profession", holderKey(value.profession()))
+        obj.addProperty("level", value.level())
+        return obj
+    }
+
+    private fun holderKey(holder: Holder<*>): String {
+        return holder.unwrapKey()
+            .map { key -> key.identifier().toString() }
+            .orElseThrow { IllegalStateException("Default holder has no registry key: $holder") }
     }
 }

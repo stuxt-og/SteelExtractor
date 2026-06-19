@@ -8,14 +8,20 @@ import net.minecraft.core.component.DataComponents
 import net.minecraft.core.registries.BuiltInRegistries
 import net.minecraft.server.MinecraftServer
 import net.minecraft.sounds.SoundEvent
+import net.minecraft.world.entity.Entity
+import net.minecraft.world.entity.EntitySpawnReason
+import net.minecraft.world.entity.EntityType
+import net.minecraft.world.entity.EntityTypes
+import net.minecraft.world.entity.player.Player
 import net.minecraft.world.item.Item
 import net.minecraft.world.level.block.Block
 import net.minecraft.world.level.material.Fluid
 import org.slf4j.LoggerFactory
+import java.lang.reflect.Method
 import java.lang.reflect.Modifier
 
 class Classes : SteelExtractor.Extractor {
-    private val logger = LoggerFactory.getLogger("steel-extractor-block-classes")
+    private val logger = LoggerFactory.getLogger("steel-extractor-classes")
 
     override fun fileName(): String {
         return "steel-core/build/classes.json"
@@ -67,6 +73,91 @@ class Classes : SteelExtractor.Extractor {
         }
     }
 
+    private fun itemPath(item: Item): String? {
+        return BuiltInRegistries.ITEM.getKey(item).path
+    }
+
+    private fun entityJavaClass(entityType: EntityType<*>, entity: Entity?): Class<*> {
+        if (entity != null) {
+            return entity.javaClass
+        }
+        if (entityType == EntityTypes.PLAYER) {
+            return Player::class.java
+        }
+        return entityType.baseClass
+    }
+
+    @Suppress("UNCHECKED_CAST")
+    private fun createEntity(entityType: EntityType<*>, server: MinecraftServer, name: String): Entity? {
+        return try {
+            (entityType as EntityType<Entity>).create(server.overworld(), EntitySpawnReason.LOAD)
+        } catch (e: Exception) {
+            logger.warn("Failed to create entity instance for $name: ${e.message}")
+            null
+        }
+    }
+
+    private fun findNoArgMethod(entityClass: Class<*>, methodName: String): Method? {
+        var clazz: Class<*>? = entityClass
+        while (clazz != null && Entity::class.java.isAssignableFrom(clazz)) {
+            for (method in clazz.declaredMethods) {
+                val isTargetMethod = method.name == methodName && method.parameterCount == 0
+                if (isTargetMethod && !Modifier.isAbstract(method.modifiers)) {
+                    method.isAccessible = true
+                    return method
+                }
+            }
+            clazz = clazz.superclass
+        }
+        return null
+    }
+
+    private fun extractDropItem(entity: Entity): String? {
+        val method = findNoArgMethod(entity.javaClass, "getDropItem") ?: return null
+        if (!Item::class.java.isAssignableFrom(method.returnType)) {
+            return null
+        }
+
+        return try {
+            val item = method.invoke(entity) as? Item ?: return null
+            itemPath(item)
+        } catch (e: Exception) {
+            logger.warn("Failed to extract drop item for ${entity.javaClass.name}: ${e.message}")
+            null
+        }
+    }
+
+    private fun extractEntityConstructorData(entity: Entity, json: JsonObject) {
+        val dropItem = extractDropItem(entity)
+        if (dropItem != null) {
+            json.addProperty("drop_item", dropItem)
+        }
+    }
+
+    private fun extractEntities(server: MinecraftServer): JsonArray {
+        val entitiesJson = JsonArray()
+
+        for (entityType in BuiltInRegistries.ENTITY_TYPE) {
+            val name = BuiltInRegistries.ENTITY_TYPE.getKey(entityType).path
+            val entity = createEntity(entityType, server, name)
+            try {
+                val entityClass = entityJavaClass(entityType, entity)
+                val entityJson = JsonObject()
+                entityJson.addProperty("name", name)
+                entityJson.addProperty("class", entityClass.simpleName)
+                entityJson.addProperty("java_class", entityClass.name)
+                if (entity != null) {
+                    extractEntityConstructorData(entity, entityJson)
+                }
+                entitiesJson.add(entityJson)
+            } finally {
+                entity?.discard()
+            }
+        }
+
+        return entitiesJson
+    }
+
     override fun extract(server: MinecraftServer): JsonElement {
         val topLevelJson = JsonObject()
 
@@ -103,6 +194,8 @@ class Classes : SteelExtractor.Extractor {
             itemsJson.add(itemJson)
         }
         topLevelJson.add("items", itemsJson)
+
+        topLevelJson.add("entities", extractEntities(server))
 
         return topLevelJson
     }

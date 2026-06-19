@@ -1,6 +1,7 @@
 package com.steelextractor.extractors
 
 import com.google.gson.JsonElement
+import com.google.gson.JsonArray
 import com.google.gson.JsonObject
 import com.steelextractor.SteelExtractor
 import net.minecraft.core.registries.BuiltInRegistries
@@ -12,15 +13,21 @@ class SoundEvents : SteelExtractor.Extractor {
     }
 
     override fun extract(server: MinecraftServer): JsonElement {
-        val json = JsonObject()
+        val json = JsonArray()
 
         for (soundEvent in BuiltInRegistries.SOUND_EVENT) {
             val key = BuiltInRegistries.SOUND_EVENT.getKey(soundEvent)
+                ?: error("Sound event has no registry key: $soundEvent")
             val id = BuiltInRegistries.SOUND_EVENT.getId(soundEvent)
 
-            // Use the path as key (e.g., "block.stone.place" -> "BLOCK_STONE_PLACE")
-            val constName = key?.path?.uppercase()?.replace('.', '_') ?: continue
-            json.addProperty(constName, id)
+            val entry = JsonObject()
+            entry.addProperty("id", id)
+            entry.addProperty("key", key.toString())
+            entry.addProperty("sound_id", soundEvent.location().toString())
+            soundEvent.fixedRange().ifPresent { range ->
+                entry.addProperty("fixed_range", range)
+            }
+            json.add(entry)
         }
 
         return json

@@ -32,12 +32,11 @@ class SoundTypes : SteelExtractor.Extractor {
                 typeJson.addProperty("volume", soundType.volume)
                 typeJson.addProperty("pitch", soundType.pitch)
 
-                // Get sound event IDs from the registry
-                typeJson.addProperty("break_sound", getSoundEventId(soundType.breakSound))
-                typeJson.addProperty("step_sound", getSoundEventId(soundType.stepSound))
-                typeJson.addProperty("place_sound", getSoundEventId(soundType.placeSound))
-                typeJson.addProperty("hit_sound", getSoundEventId(soundType.hitSound))
-                typeJson.addProperty("fall_sound", getSoundEventId(soundType.fallSound))
+                typeJson.addProperty("break_sound", getSoundEventKey(soundType.breakSound))
+                typeJson.addProperty("step_sound", getSoundEventKey(soundType.stepSound))
+                typeJson.addProperty("place_sound", getSoundEventKey(soundType.placeSound))
+                typeJson.addProperty("hit_sound", getSoundEventKey(soundType.hitSound))
+                typeJson.addProperty("fall_sound", getSoundEventKey(soundType.fallSound))
 
                 json.add(name, typeJson)
             }
@@ -46,7 +45,9 @@ class SoundTypes : SteelExtractor.Extractor {
         return json
     }
 
-    private fun getSoundEventId(soundEvent: net.minecraft.sounds.SoundEvent): Int {
-        return BuiltInRegistries.SOUND_EVENT.getId(soundEvent)
+    private fun getSoundEventKey(soundEvent: net.minecraft.sounds.SoundEvent): String {
+        val key = BuiltInRegistries.SOUND_EVENT.getKey(soundEvent)
+            ?: error("Sound type references unregistered sound event: $soundEvent")
+        return key.toString()
     }
 }

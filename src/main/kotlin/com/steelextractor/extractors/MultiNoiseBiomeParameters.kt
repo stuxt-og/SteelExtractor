@@ -29,7 +29,7 @@ class MultiNoiseBiomeParameters : SteelExtractor.Extractor {
     private val logger = LoggerFactory.getLogger("steel-extractor-multi-noise-biome-parameters")
 
     override fun fileName(): String {
-        return "steel-registry/build_assets/multi_noise_biome_source_parameters.json"
+        return "steel-worldgen/build_assets/multi_noise_biome_source_parameters.json"
     }
 
     private fun parameterToJson(param: Climate.Parameter): JsonArray {
