@@ -6,6 +6,7 @@ import com.google.gson.JsonObject
 import com.steelextractor.SteelExtractor
 import net.minecraft.core.registries.BuiltInRegistries
 import net.minecraft.server.MinecraftServer
+import net.minecraft.world.effect.MobEffectInstance
 import org.slf4j.LoggerFactory
 
 class Potions : SteelExtractor.Extractor {
@@ -13,6 +14,20 @@ class Potions : SteelExtractor.Extractor {
 
     override fun fileName(): String {
         return "steel-registry/build_assets/potions.json"
+    }
+
+    fun exportInstance(effectInstance: MobEffectInstance): JsonObject {
+        val effectJson = JsonObject()
+        val effectKey = BuiltInRegistries.MOB_EFFECT.getKey(effectInstance.effect.value())
+        effectJson.addProperty("name", effectKey?.path ?: "unknown")
+        effectJson.addProperty("duration", effectInstance.duration)
+        effectJson.addProperty("amplifier", effectInstance.amplifier)
+        effectJson.addProperty("ambient", effectInstance.isAmbient)
+        effectJson.addProperty("visible", effectInstance.isVisible)
+        effectJson.addProperty("show_icon", effectInstance.showIcon())
+        effectInstance.hiddenEffect?.let { effectJson.add("hidden_effect", exportInstance(it)) }
+
+        return effectJson
     }
 
     override fun extract(server: MinecraftServer): JsonElement {
@@ -32,12 +47,7 @@ class Potions : SteelExtractor.Extractor {
                 // Extract effects
                 val effectsArray = JsonArray()
                 for (effectInstance in potion.effects) {
-                    val effectJson = JsonObject()
-                    val effectKey = BuiltInRegistries.MOB_EFFECT.getKey(effectInstance.effect.value())
-                    effectJson.addProperty("effect", effectKey?.path ?: "unknown")
-                    effectJson.addProperty("duration", effectInstance.duration)
-                    effectJson.addProperty("amplifier", effectInstance.amplifier)
-                    effectsArray.add(effectJson)
+                    effectsArray.add(exportInstance(effectInstance))
                 }
                 potionJson.add("effects", effectsArray)
             } catch (e: Exception) {

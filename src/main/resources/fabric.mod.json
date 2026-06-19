@@ -48,6 +48,7 @@
 		"fabric-api": "*",
 		"fabric-language-kotlin": "*"
 	},
+    "accessWidener": "steel-extractor.accesswidener",
 	"suggests": {
 		"another-mod": "*"
 	}

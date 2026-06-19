@@ -6,6 +6,7 @@ import com.google.gson.JsonObject
 import com.mojang.serialization.JsonOps
 import com.steelextractor.SteelExtractor
 import net.minecraft.core.component.DataComponentMap
+import net.minecraft.core.component.DataComponents
 import net.minecraft.core.registries.BuiltInRegistries
 import net.minecraft.resources.RegistryOps
 import net.minecraft.server.MinecraftServer
@@ -52,13 +53,13 @@ class Items : SteelExtractor.Extractor {
 
         val itemsJson = JsonArray()
 
-
         for (item in BuiltInRegistries.ITEM) {
             val itemJson = JsonObject()
 
+            val registryName = BuiltInRegistries.ITEM.getKey(item).path
 
             itemJson.addProperty("id", BuiltInRegistries.ITEM.getId(item))
-            itemJson.addProperty("name", BuiltInRegistries.ITEM.getKey(item).path)
+            itemJson.addProperty("name", registryName)
 
             if (item is BlockItem) {
                 itemJson.addProperty("blockItem", BuiltInRegistries.BLOCK.getKey(item.block).path)
@@ -70,6 +71,13 @@ class Items : SteelExtractor.Extractor {
                     "wallBlock",
                     BuiltInRegistries.BLOCK.getKey(wallBlockField.get(item) as Block).path
                 )
+            }
+
+            val className = when {
+                item.javaClass.simpleName == "PotionItem" -> "PotionItem"
+                registryName == "milk_bucket" -> "ConsumableItem"
+                item.components().get(DataComponents.FOOD) != null -> "FoodItem"
+                else -> item.javaClass.simpleName
             }
 
             val temp = DataComponentMap.CODEC.encodeStart(
@@ -85,12 +93,10 @@ class Items : SteelExtractor.Extractor {
 
             itemJson.add("components", sortedComponents)
 
-            itemJson.addProperty("class", item.javaClass.simpleName)
-
+            itemJson.addProperty("class", className)
 
             itemsJson.add(itemJson)
         }
-
 
         topLevelJson.add("items", itemsJson)
 

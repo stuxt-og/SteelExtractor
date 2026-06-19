@@ -4,6 +4,7 @@ import com.google.gson.JsonArray
 import com.google.gson.JsonElement
 import com.google.gson.JsonObject
 import com.steelextractor.SteelExtractor
+import net.minecraft.core.component.DataComponents
 import net.minecraft.core.registries.BuiltInRegistries
 import net.minecraft.server.MinecraftServer
 import net.minecraft.sounds.SoundEvent
@@ -26,9 +27,6 @@ class Classes : SteelExtractor.Extractor {
         }.lowercase()
     }
 
-    /// Serialize a field value into the JSON object based on its type.
-    /// Primitives, enums, and registry entries are serialized directly.
-    /// Unknown object types are recursed into (one level deep) to extract their fields.
     private fun trySerialize(value: Any, key: String, json: JsonObject, depth: Int) {
         when (value) {
             is Boolean -> json.addProperty(key, value)
@@ -47,7 +45,6 @@ class Classes : SteelExtractor.Extractor {
         }
     }
 
-    /// Extract all declared instance fields from the given class on the given object.
     private fun extractDeclaredFields(
         obj: Any, clazz: Class<*>, json: JsonObject, prefix: String = "", depth: Int = 0
     ) {
@@ -58,14 +55,10 @@ class Classes : SteelExtractor.Extractor {
                 val value = field.get(obj) ?: continue
                 val key = camelToSnake(field.name).let { if (prefix.isEmpty()) it else "${prefix}_$it" }
                 trySerialize(value, key, json, depth)
-            } catch (_: Exception) {
-                // Skip inaccessible fields
-            }
+            } catch (_: Exception) {}
         }
     }
 
-    /// Walk up the class hierarchy from the concrete class to (but not including) the stop class,
-    /// extracting declared fields at each level.
     private fun extractSubclassFields(obj: Any, stopClass: Class<*>, json: JsonObject) {
         var clazz: Class<*>? = obj.javaClass
         while (clazz != null && clazz != stopClass) {
@@ -90,9 +83,23 @@ class Classes : SteelExtractor.Extractor {
         val itemsJson = JsonArray()
         for (item in BuiltInRegistries.ITEM) {
             val itemJson = JsonObject()
-            itemJson.addProperty("name", BuiltInRegistries.ITEM.getKey(item)?.path ?: "unknown")
-            itemJson.addProperty("class", item.javaClass.simpleName)
+            //val ominousBottleAmplifier = item.components().get(DataComponents.OMINOUS_BOTTLE_AMPLIFIER)
+
+            val registryName = BuiltInRegistries.ITEM.getKey(item).path
+            itemJson.addProperty("name", registryName)
+
+            val className = when {
+                item.javaClass.simpleName == "PotionItem" -> "ConsumableItem"
+                registryName == "milk_bucket" -> "ConsumableItem"
+                item.javaClass.simpleName.contains("Bucket") -> item.javaClass.simpleName
+                item.components().get(DataComponents.FOOD) != null -> "ConsumableItem"
+                else -> item.javaClass.simpleName
+            }
+
+            itemJson.addProperty("class", className)
+
             extractSubclassFields(item, Item::class.java, itemJson)
+
             itemsJson.add(itemJson)
         }
         topLevelJson.add("items", itemsJson)
